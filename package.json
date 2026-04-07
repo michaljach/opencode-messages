@@ -3,19 +3,38 @@
   "version": "0.1.0",
   "description": "OpenCode plugin that bridges Messages.dev iMessage conversations into OpenCode sessions.",
   "type": "module",
+  "main": "./dist/index.js",
   "exports": {
-    ".": "./index.ts"
+    ".": "./dist/index.js"
   },
   "files": [
-    "index.ts",
+    "dist",
     "README.md",
     "tsconfig.json"
   ],
+  "scripts": {
+    "build": "esbuild index.ts --bundle --format=esm --platform=node --outfile=dist/index.js",
+    "prepare": "npm run build"
+  },
   "keywords": [
     "opencode",
     "opencode-plugin",
     "messages.dev",
     "imessage"
   ],
-  "license": "MIT"
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/michaljach/opencode-messages.git"
+  },
+  "homepage": "https://github.com/michaljach/opencode-messages#readme",
+  "bugs": {
+    "url": "https://github.com/michaljach/opencode-messages/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "esbuild": "^0.25.3"
+  }
 }

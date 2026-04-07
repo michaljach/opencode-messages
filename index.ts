@@ -83,6 +83,22 @@ type ParsedConfig = {
   maxChunkChars: number
 }
 
+type FileConfig = {
+  apiKey?: string
+  line?: string
+  webhookSecret?: string
+  allowedSenders?: string[]
+  host?: string
+  port?: number
+  webhookPath?: string
+  statePath?: string
+  maxChunkChars?: number
+}
+
+type OpenCodeProjectConfig = {
+  opencodeMessages?: FileConfig
+}
+
 type MessagesWebhookPayload = {
   event?: string
   data?: {
@@ -261,23 +277,66 @@ async function log(client: PluginContext["client"], level: LogLevel, message: st
   }
 }
 
-function parseConfig(worktree: string): { missing: string[]; config: ParsedConfig } {
-  const apiKey = Bun.env.OPENCODE_MESSAGES_DEV_API_KEY || ""
-  const line = normalizeHandle(Bun.env.OPENCODE_MESSAGES_DEV_LINE)
-  const webhookSecret = Bun.env.OPENCODE_MESSAGES_DEV_WEBHOOK_SECRET || ""
-  const allowedSenders = parseList(Bun.env.OPENCODE_MESSAGES_DEV_ALLOWED_SENDERS)
-  const host = Bun.env.OPENCODE_MESSAGES_DEV_HOST || DEFAULT_HOST
-  const port = Number(Bun.env.OPENCODE_MESSAGES_DEV_PORT || DEFAULT_PORT)
-  const webhookPath = Bun.env.OPENCODE_MESSAGES_DEV_WEBHOOK_PATH || DEFAULT_WEBHOOK_PATH
-  const statePath = join(worktree, Bun.env.OPENCODE_MESSAGES_DEV_STATE_FILE || DEFAULT_STATE_FILE)
-  const maxChunkChars = Number(Bun.env.OPENCODE_MESSAGES_DEV_MAX_CHUNK_CHARS || DEFAULT_MAX_CHUNK_CHARS)
+async function readConfigFile(worktree: string): Promise<FileConfig> {
+  const configPath = join(worktree, "opencode.json")
+
+  try {
+    const raw = await readFile(configPath, "utf8")
+    const parsed = JSON.parse(raw) as OpenCodeProjectConfig
+    return parsed.opencodeMessages || {}
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code !== "ENOENT") throw error
+    return {}
+  }
+}
+
+function readConfigValue(fileConfig: FileConfig, key: keyof FileConfig, ...envNames: string[]): unknown {
+  for (const envName of envNames) {
+    const value = Bun.env[envName]
+    if (value !== undefined && value !== "") return value
+  }
+
+  return fileConfig[key]
+}
+
+async function parseConfig(worktree: string): Promise<{ missing: string[]; config: ParsedConfig }> {
+  const fileConfig = await readConfigFile(worktree)
+
+  const apiKey = String(readConfigValue(fileConfig, "apiKey", "OPENCODE_MESSAGES_API_KEY", "OPENCODE_MESSAGES_DEV_API_KEY") || "")
+  const line = normalizeHandle(readConfigValue(fileConfig, "line", "OPENCODE_MESSAGES_LINE", "OPENCODE_MESSAGES_DEV_LINE"))
+  const webhookSecret = String(
+    readConfigValue(fileConfig, "webhookSecret", "OPENCODE_MESSAGES_WEBHOOK_SECRET", "OPENCODE_MESSAGES_DEV_WEBHOOK_SECRET") || "",
+  )
+  const allowedSendersValue = readConfigValue(
+    fileConfig,
+    "allowedSenders",
+    "OPENCODE_MESSAGES_ALLOWED_SENDERS",
+    "OPENCODE_MESSAGES_DEV_ALLOWED_SENDERS",
+  )
+  const allowedSenders = Array.isArray(allowedSendersValue)
+    ? allowedSendersValue.map((item) => normalizeHandle(item)).filter(Boolean)
+    : parseList(allowedSendersValue)
+  const host =
+    String(readConfigValue(fileConfig, "host", "OPENCODE_MESSAGES_HOST", "OPENCODE_MESSAGES_DEV_HOST") || "") || DEFAULT_HOST
+  const port = Number(readConfigValue(fileConfig, "port", "OPENCODE_MESSAGES_PORT", "OPENCODE_MESSAGES_DEV_PORT") || DEFAULT_PORT)
+  const webhookPath =
+    String(readConfigValue(fileConfig, "webhookPath", "OPENCODE_MESSAGES_WEBHOOK_PATH", "OPENCODE_MESSAGES_DEV_WEBHOOK_PATH") || "") ||
+    DEFAULT_WEBHOOK_PATH
+  const statePathValue =
+    String(readConfigValue(fileConfig, "statePath", "OPENCODE_MESSAGES_STATE_FILE", "OPENCODE_MESSAGES_DEV_STATE_FILE") || "") ||
+    DEFAULT_STATE_FILE
+  const statePath = join(worktree, statePathValue)
+  const maxChunkChars = Number(
+    readConfigValue(fileConfig, "maxChunkChars", "OPENCODE_MESSAGES_MAX_CHUNK_CHARS", "OPENCODE_MESSAGES_DEV_MAX_CHUNK_CHARS") ||
+      DEFAULT_MAX_CHUNK_CHARS,
+  )
 
   const missing: string[] = []
-  if (!apiKey) missing.push("OPENCODE_MESSAGES_DEV_API_KEY")
-  if (!line) missing.push("OPENCODE_MESSAGES_DEV_LINE")
-  if (!webhookSecret) missing.push("OPENCODE_MESSAGES_DEV_WEBHOOK_SECRET")
-  if (!allowedSenders.length) missing.push("OPENCODE_MESSAGES_DEV_ALLOWED_SENDERS")
-  if (!Number.isFinite(port) || port <= 0) missing.push("OPENCODE_MESSAGES_DEV_PORT")
+  if (!apiKey) missing.push("OPENCODE_MESSAGES_API_KEY")
+  if (!line) missing.push("OPENCODE_MESSAGES_LINE")
+  if (!webhookSecret) missing.push("OPENCODE_MESSAGES_WEBHOOK_SECRET")
+  if (!allowedSenders.length) missing.push("OPENCODE_MESSAGES_ALLOWED_SENDERS")
+  if (!Number.isFinite(port) || port <= 0) missing.push("OPENCODE_MESSAGES_PORT")
 
   return {
     missing,
@@ -421,7 +480,7 @@ function getSessionStatus(statusMap: SessionStatusMap, sessionID: string): strin
 }
 
 export const OpencodeMessagesPlugin = async ({ client, worktree }: PluginContext): Promise<Record<string, unknown>> => {
-  const { config, missing } = parseConfig(worktree)
+  const { config, missing } = await parseConfig(worktree)
 
   if (missing.length) {
     await log(client, "warn", "Plugin disabled because environment is incomplete", { missing })

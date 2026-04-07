@@ -2,7 +2,7 @@
 
 Installable OpenCode plugin package for controlling a running OpenCode instance from your iPhone over iMessage using [Messages.dev](https://www.messages.dev/).
 
-The package exports `OpencodeMessagesPlugin` and also includes a thin local wrapper at `.opencode/plugins/opencode-messages.ts` for development in this repo.
+The package exports `OpencodeMessagesPlugin` and is designed so users can configure everything directly in `opencode.json`.
 
 It:
 
@@ -24,6 +24,44 @@ It:
 - `/approve <permission-id>`
 - `/deny <permission-id>`
 
+## Quick Start
+
+1. Install the package:
+
+```bash
+npm install opencode-messages
+```
+
+2. Put this in `opencode.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["opencode-messages"],
+  "opencodeMessages": {
+    "apiKey": "sk_live_...",
+    "line": "+15551234567",
+    "webhookSecret": "whsec_...",
+    "allowedSenders": ["+15559876543"]
+  }
+}
+```
+
+3. Start OpenCode in the project.
+4. Expose the local bridge over HTTPS:
+
+```bash
+cloudflared tunnel --url http://127.0.0.1:8787
+```
+
+5. In Messages.dev, create a `message.received` webhook pointing to:
+
+```text
+https://<your-public-host>/opencode-messages/webhook
+```
+
+6. Send `/help` from your iPhone.
+
 ## Install
 
 Published package usage in `opencode.json`:
@@ -31,55 +69,51 @@ Published package usage in `opencode.json`:
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["opencode-messages"]
+  "plugin": ["opencode-messages"],
+  "opencodeMessages": {
+    "apiKey": "sk_live_...",
+    "line": "+15551234567",
+    "webhookSecret": "whsec_...",
+    "allowedSenders": ["+15559876543"]
+  }
 }
 ```
 
-Until you publish it, you can use the included local wrapper in this repo or copy `index.ts` into your own package.
+That is the lowest-friction setup path because users already need this file for the plugin entry.
 
-## Setup
+## Manual Setup
 
-1. Install the package through OpenCode once it is published, or use the local wrapper in `.opencode/plugins/opencode-messages.ts` while developing.
-2. Export the required environment variables before launching OpenCode:
-
-```bash
-export OPENCODE_MESSAGES_DEV_API_KEY="sk_live_..."
-export OPENCODE_MESSAGES_DEV_LINE="+15551234567"
-export OPENCODE_MESSAGES_DEV_WEBHOOK_SECRET="whsec_..."
-export OPENCODE_MESSAGES_DEV_ALLOWED_SENDERS="+15559876543"
-```
-
-3. Optional environment variables:
+You can also use environment variables instead of `opencode.json`:
 
 ```bash
-export OPENCODE_MESSAGES_DEV_HOST="127.0.0.1"
-export OPENCODE_MESSAGES_DEV_PORT="8787"
-export OPENCODE_MESSAGES_DEV_WEBHOOK_PATH="/opencode-messages/webhook"
-export OPENCODE_MESSAGES_DEV_STATE_FILE=".opencode/opencode-messages-state.json"
-export OPENCODE_MESSAGES_DEV_MAX_CHUNK_CHARS="1800"
+export OPENCODE_MESSAGES_API_KEY="sk_live_..."
+export OPENCODE_MESSAGES_LINE="+15551234567"
+export OPENCODE_MESSAGES_WEBHOOK_SECRET="whsec_..."
+export OPENCODE_MESSAGES_ALLOWED_SENDERS="+15559876543"
 ```
 
-4. Start OpenCode in the target project.
-5. Expose the local webhook server over HTTPS. A tunnel is the simplest way. Example with `cloudflared`:
+Optional overrides:
 
 ```bash
-cloudflared tunnel --url http://127.0.0.1:8787
+export OPENCODE_MESSAGES_HOST="127.0.0.1"
+export OPENCODE_MESSAGES_PORT="8787"
+export OPENCODE_MESSAGES_WEBHOOK_PATH="/opencode-messages/webhook"
+export OPENCODE_MESSAGES_STATE_FILE=".opencode/opencode-messages-state.json"
+export OPENCODE_MESSAGES_MAX_CHUNK_CHARS="1800"
 ```
-
-6. In Messages.dev, create a webhook for your configured line:
-   URL: `https://<your-public-host>/opencode-messages/webhook`
-   Events: `message.received`
-
-7. Send `/help` from your allowed iPhone number.
 
 ## Package Layout
 
-- `index.ts`: package entrypoint for npm/plugin installation
+- `index.ts`: source for the package plugin entrypoint
+- `dist/index.js`: built plugin entrypoint published to npm
 - `.opencode/plugins/opencode-messages.ts`: local development wrapper that re-exports the package plugin
 
 ## Notes
 
-- The plugin only accepts senders listed in `OPENCODE_MESSAGES_DEV_ALLOWED_SENDERS`.
+- The plugin reads `opencode.json` from the `opencodeMessages` block, and environment variables override file values when both are present.
+- The plugin accepts both the new `OPENCODE_MESSAGES_*` variables and the older `OPENCODE_MESSAGES_DEV_*` names for compatibility.
+- The plugin only accepts senders listed in `allowedSenders` or `OPENCODE_MESSAGES_ALLOWED_SENDERS`.
+- If you do not want secrets in `opencode.json`, use environment variables instead.
 - State is persisted in `.opencode/opencode-messages-state.json` so sender-to-session mappings survive restarts.
 - Permission prompts from OpenCode are sent back to iMessage, and you can reply with `/approve <id>` or `/deny <id>`.
 - Incoming webhooks must reach the machine running OpenCode. Messages.dev requires an HTTPS endpoint for webhook delivery.
