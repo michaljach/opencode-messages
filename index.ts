@@ -75,6 +75,7 @@ type ParsedConfig = {
   apiKey: string
   line: string
   webhookSecret: string
+  publicUrl: string
   allowedSenders: Set<string>
   host: string
   port: number
@@ -87,6 +88,7 @@ type FileConfig = {
   apiKey?: string
   line?: string
   webhookSecret?: string
+  publicUrl?: string
   allowedSenders?: string[]
   host?: string
   port?: number
@@ -107,6 +109,14 @@ type MessagesWebhookPayload = {
     text?: string
     is_from_me?: boolean
   }
+}
+
+type MessagesWebhook = {
+  id: string
+  url: string
+  events: string[]
+  secret: string
+  is_active?: boolean
 }
 
 const SERVICE = "opencode-messages"
@@ -307,6 +317,7 @@ async function parseConfig(worktree: string): Promise<{ missing: string[]; confi
   const webhookSecret = String(
     readConfigValue(fileConfig, "webhookSecret", "OPENCODE_MESSAGES_WEBHOOK_SECRET", "OPENCODE_MESSAGES_DEV_WEBHOOK_SECRET") || "",
   )
+  const publicUrl = String(readConfigValue(fileConfig, "publicUrl", "OPENCODE_MESSAGES_PUBLIC_URL") || "")
   const allowedSendersValue = readConfigValue(
     fileConfig,
     "allowedSenders",
@@ -334,7 +345,7 @@ async function parseConfig(worktree: string): Promise<{ missing: string[]; confi
   const missing: string[] = []
   if (!apiKey) missing.push("OPENCODE_MESSAGES_API_KEY")
   if (!line) missing.push("OPENCODE_MESSAGES_LINE")
-  if (!webhookSecret) missing.push("OPENCODE_MESSAGES_WEBHOOK_SECRET")
+  if (!publicUrl && !webhookSecret) missing.push("OPENCODE_MESSAGES_WEBHOOK_SECRET or OPENCODE_MESSAGES_PUBLIC_URL")
   if (!allowedSenders.length) missing.push("OPENCODE_MESSAGES_ALLOWED_SENDERS")
   if (!Number.isFinite(port) || port <= 0) missing.push("OPENCODE_MESSAGES_PORT")
 
@@ -344,6 +355,7 @@ async function parseConfig(worktree: string): Promise<{ missing: string[]; confi
       apiKey,
       line,
       webhookSecret,
+      publicUrl,
       allowedSenders: new Set(allowedSenders),
       host,
       port,
@@ -377,6 +389,41 @@ async function messagesFetch(config: ParsedConfig, path: string, init: RequestIn
   }
 
   return body
+}
+
+function buildWebhookUrl(publicUrl: string, webhookPath: string): string {
+  const url = new URL(publicUrl)
+  url.pathname = webhookPath
+  url.search = ""
+  url.hash = ""
+  return url.toString()
+}
+
+async function ensureWebhook(config: ParsedConfig): Promise<string> {
+  if (!config.publicUrl) return config.webhookSecret
+
+  const webhookURL = buildWebhookUrl(config.publicUrl, config.webhookPath)
+  const list = (await messagesFetch(config, `/webhooks?from=${encodeURIComponent(config.line)}`)) as {
+    data?: MessagesWebhook[]
+  }
+
+  const existing = (list.data || []).find(
+    (item) => item.url === webhookURL && Array.isArray(item.events) && item.events.includes("message.received") && item.secret,
+  )
+
+  if (existing?.secret) return existing.secret
+
+  const created = (await messagesFetch(config, "/webhooks", {
+    method: "POST",
+    body: JSON.stringify({
+      from: config.line,
+      url: webhookURL,
+      events: ["message.received"],
+    }),
+  })) as MessagesWebhook
+
+  if (!created?.secret) throw new Error("Messages.dev did not return a webhook secret")
+  return created.secret
 }
 
 async function sendMessage(config: ParsedConfig, to: string, text: string): Promise<void> {
@@ -485,6 +532,22 @@ export const OpencodeMessagesPlugin = async ({ client, worktree }: PluginContext
   if (missing.length) {
     await log(client, "warn", "Plugin disabled because environment is incomplete", { missing })
     return {}
+  }
+
+  if (config.publicUrl) {
+    try {
+      config.webhookSecret = await ensureWebhook(config)
+      await log(client, "info", "Messages.dev webhook configured automatically", {
+        publicUrl: config.publicUrl,
+        webhookPath: config.webhookPath,
+      })
+    } catch (error) {
+      await log(client, "error", "Failed to configure Messages.dev webhook", {
+        publicUrl: config.publicUrl,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      return {}
+    }
   }
 
   const state = new StateStore(config.statePath)

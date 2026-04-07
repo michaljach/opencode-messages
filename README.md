@@ -4,6 +4,8 @@ Installable OpenCode plugin package for controlling a running OpenCode instance 
 
 The package exports `OpencodeMessagesPlugin` and is designed so users can configure everything directly in `opencode.json`.
 
+If you provide a public tunnel URL, the plugin will create or reuse the Messages.dev webhook automatically. That removes the manual webhook setup step entirely.
+
 It:
 
 - receives `message.received` webhooks from Messages.dev
@@ -41,7 +43,7 @@ npm install opencode-messages
   "opencodeMessages": {
     "apiKey": "sk_live_...",
     "line": "+15551234567",
-    "webhookSecret": "whsec_...",
+    "publicUrl": "https://paste-your-tunnel-url-here.trycloudflare.com",
     "allowedSenders": ["+15559876543"]
   }
 }
@@ -54,13 +56,11 @@ npm install opencode-messages
 cloudflared tunnel --url http://127.0.0.1:8787
 ```
 
-5. In Messages.dev, create a `message.received` webhook pointing to:
+5. Replace `publicUrl` in `opencode.json` with the tunnel URL that `cloudflared` printed.
+6. Restart OpenCode if it was already running.
+7. Send `/help` from your iPhone.
 
-```text
-https://<your-public-host>/opencode-messages/webhook
-```
-
-6. Send `/help` from your iPhone.
+No manual Messages.dev webhook creation is needed in this mode.
 
 ## Install
 
@@ -73,7 +73,7 @@ Published package usage in `opencode.json`:
   "opencodeMessages": {
     "apiKey": "sk_live_...",
     "line": "+15551234567",
-    "webhookSecret": "whsec_...",
+    "publicUrl": "https://your-tunnel-url.trycloudflare.com",
     "allowedSenders": ["+15559876543"]
   }
 }
@@ -88,8 +88,14 @@ You can also use environment variables instead of `opencode.json`:
 ```bash
 export OPENCODE_MESSAGES_API_KEY="sk_live_..."
 export OPENCODE_MESSAGES_LINE="+15551234567"
-export OPENCODE_MESSAGES_WEBHOOK_SECRET="whsec_..."
+export OPENCODE_MESSAGES_PUBLIC_URL="https://your-tunnel-url.trycloudflare.com"
 export OPENCODE_MESSAGES_ALLOWED_SENDERS="+15559876543"
+```
+
+If you do not want the plugin to auto-manage the webhook, you can still configure a webhook yourself and provide a secret manually:
+
+```bash
+export OPENCODE_MESSAGES_WEBHOOK_SECRET="whsec_..."
 ```
 
 Optional overrides:
@@ -112,6 +118,7 @@ export OPENCODE_MESSAGES_MAX_CHUNK_CHARS="1800"
 
 - The plugin reads `opencode.json` from the `opencodeMessages` block, and environment variables override file values when both are present.
 - The plugin accepts both the new `OPENCODE_MESSAGES_*` variables and the older `OPENCODE_MESSAGES_DEV_*` names for compatibility.
+- `publicUrl` is the preferred setup path. When present, the plugin creates or reuses the Messages.dev webhook automatically.
 - The plugin only accepts senders listed in `allowedSenders` or `OPENCODE_MESSAGES_ALLOWED_SENDERS`.
 - If you do not want secrets in `opencode.json`, use environment variables instead.
 - State is persisted in `.opencode/opencode-messages-state.json` so sender-to-session mappings survive restarts.
