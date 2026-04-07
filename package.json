@@ -1,0 +1,20 @@
+{
+  "name": "opencode-plugin-messages-dev-remote",
+  "version": "0.1.0",
+  "description": "OpenCode plugin that bridges Messages.dev iMessage conversations into OpenCode sessions.",
+  "type": "module",
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "README.md"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "messages.dev",
+    "imessage"
+  ],
+  "license": "MIT"
+}
