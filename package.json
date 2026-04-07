@@ -1,14 +1,15 @@
 {
-  "name": "opencode-plugin-messages-dev-remote",
+  "name": "opencode-messages",
   "version": "0.1.0",
   "description": "OpenCode plugin that bridges Messages.dev iMessage conversations into OpenCode sessions.",
   "type": "module",
   "exports": {
-    ".": "./index.js"
+    ".": "./index.ts"
   },
   "files": [
-    "index.js",
-    "README.md"
+    "index.ts",
+    "README.md",
+    "tsconfig.json"
   ],
   "keywords": [
     "opencode",

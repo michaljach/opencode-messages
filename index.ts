@@ -2,19 +2,110 @@ import { createHmac, timingSafeEqual } from "node:crypto"
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 
-const SERVICE = "messages-dev-remote"
+type LogLevel = "debug" | "info" | "warn" | "error"
+
+type SDKData<T> = T | { data: T }
+
+type SessionStatusMap = Record<string, { type?: string }>
+
+type SessionResult = {
+  info?: {
+    error?: {
+      message?: string
+      data?: {
+        message?: string
+      }
+    }
+  }
+  parts?: Array<{
+    type?: string
+    text?: string
+  }>
+}
+
+type PermissionProperties = {
+  id: string
+  sessionID: string
+  title?: string
+  metadata?: Record<string, unknown>
+}
+
+type PluginEvent =
+  | { type: "permission.updated" | "permission.asked"; properties: PermissionProperties }
+  | { type: "permission.replied"; properties: { sessionID: string; permissionID: string } }
+  | { type: "session.deleted"; properties: { info: { id: string } } }
+  | { type: string; properties?: Record<string, unknown> }
+
+type PluginContext = {
+  client: {
+    app: {
+      log: (input: { body: { service: string; level: LogLevel; message: string; extra?: Record<string, unknown> } }) => Promise<unknown>
+    }
+    session: {
+      create: (input: { body: { title: string } }) => Promise<SDKData<{ id: string; title?: string }>>
+      get: (input: { path: { id: string } }) => Promise<SDKData<{ id: string; title?: string }>>
+      status: () => Promise<SDKData<SessionStatusMap>>
+      abort: (input: { path: { id: string } }) => Promise<unknown>
+      command: (input: { path: { id: string }; body: { command: string; arguments: string } }) => Promise<SDKData<SessionResult>>
+      shell: (input: { path: { id: string }; body: { agent: string; command: string } }) => Promise<SDKData<SessionResult>>
+      prompt: (input: { path: { id: string }; body: { parts: Array<{ type: "text"; text: string }> } }) => Promise<SDKData<SessionResult>>
+    }
+    postSessionIdPermissionsPermissionId: (input: {
+      path: { id: string; permissionID: string }
+      body: { response: "once" | "always" | "reject" }
+    }) => Promise<unknown>
+  }
+  worktree: string
+}
+
+type StoredPermission = {
+  permissionID: string
+  sessionID: string
+  title?: string
+}
+
+type StateData = {
+  currentSessionBySender: Record<string, string>
+  senderBySession: Record<string, string>
+  permissionsBySender: Record<string, StoredPermission[]>
+  processedMessages: string[]
+}
+
+type ParsedConfig = {
+  apiKey: string
+  line: string
+  webhookSecret: string
+  allowedSenders: Set<string>
+  host: string
+  port: number
+  webhookPath: string
+  statePath: string
+  maxChunkChars: number
+}
+
+type MessagesWebhookPayload = {
+  event?: string
+  data?: {
+    id?: string
+    sender?: string
+    text?: string
+    is_from_me?: boolean
+  }
+}
+
+const SERVICE = "opencode-messages"
 const DEFAULT_HOST = "127.0.0.1"
 const DEFAULT_PORT = 8787
-const DEFAULT_WEBHOOK_PATH = "/messages-dev/webhook"
-const DEFAULT_STATE_FILE = ".opencode/messages-dev-remote-state.json"
+const DEFAULT_WEBHOOK_PATH = "/opencode-messages/webhook"
+const DEFAULT_STATE_FILE = ".opencode/opencode-messages-state.json"
 const DEFAULT_MAX_CHUNK_CHARS = 1800
 const PROCESSED_MESSAGE_LIMIT = 200
 
-function unwrap(result) {
+function unwrap<T>(result: SDKData<T>): T {
   return result && typeof result === "object" && "data" in result ? result.data : result
 }
 
-function normalizeHandle(value) {
+function normalizeHandle(value: unknown): string {
   if (!value) return ""
 
   const trimmed = String(value).trim()
@@ -23,15 +114,15 @@ function normalizeHandle(value) {
   return trimmed.replace(/[^+\d]/g, "")
 }
 
-function parseList(value) {
+function parseList(value: unknown): string[] {
   return String(value || "")
     .split(",")
     .map((item) => normalizeHandle(item))
     .filter(Boolean)
 }
 
-function splitText(text, maxChunkChars) {
-  const chunks = []
+function splitText(text: string, maxChunkChars: number): string[] {
+  const chunks: string[] = []
   let remaining = String(text || "").trim()
 
   while (remaining.length > maxChunkChars) {
@@ -47,7 +138,7 @@ function splitText(text, maxChunkChars) {
   return chunks.length ? chunks : [""]
 }
 
-function createEmptyState() {
+function createEmptyState(): StateData {
   return {
     currentSessionBySender: {},
     senderBySession: {},
@@ -57,41 +148,44 @@ function createEmptyState() {
 }
 
 class StateStore {
-  constructor(filePath) {
+  filePath: string
+  state: StateData
+
+  constructor(filePath: string) {
     this.filePath = filePath
     this.state = createEmptyState()
   }
 
-  async load() {
+  async load(): Promise<void> {
     try {
       const raw = await readFile(this.filePath, "utf8")
-      const parsed = JSON.parse(raw)
+      const parsed = JSON.parse(raw) as Partial<StateData>
       this.state = {
         ...createEmptyState(),
         ...parsed,
       }
     } catch (error) {
-      if (error && error.code !== "ENOENT") throw error
+      if (error && typeof error === "object" && "code" in error && error.code !== "ENOENT") throw error
       this.state = createEmptyState()
     }
   }
 
-  async save() {
+  async save(): Promise<void> {
     await mkdir(dirname(this.filePath), { recursive: true })
     await writeFile(this.filePath, `${JSON.stringify(this.state, null, 2)}\n`, "utf8")
   }
 
-  getCurrentSession(sender) {
+  getCurrentSession(sender: string): string | null {
     return this.state.currentSessionBySender[sender] || null
   }
 
-  async setCurrentSession(sender, sessionID) {
+  async setCurrentSession(sender: string, sessionID: string): Promise<void> {
     this.state.currentSessionBySender[sender] = sessionID
     this.state.senderBySession[sessionID] = sender
     await this.save()
   }
 
-  async removeSession(sessionID) {
+  async removeSession(sessionID: string): Promise<void> {
     const sender = this.state.senderBySession[sessionID]
     delete this.state.senderBySession[sessionID]
     if (sender && this.state.currentSessionBySender[sender] === sessionID) {
@@ -100,11 +194,11 @@ class StateStore {
     await this.save()
   }
 
-  hasProcessedMessage(messageID) {
+  hasProcessedMessage(messageID: string): boolean {
     return this.state.processedMessages.includes(messageID)
   }
 
-  async rememberProcessedMessage(messageID) {
+  async rememberProcessedMessage(messageID: string): Promise<void> {
     this.state.processedMessages.push(messageID)
     if (this.state.processedMessages.length > PROCESSED_MESSAGE_LIMIT) {
       this.state.processedMessages = this.state.processedMessages.slice(-PROCESSED_MESSAGE_LIMIT)
@@ -112,7 +206,7 @@ class StateStore {
     await this.save()
   }
 
-  async addPermission(sender, permission) {
+  async addPermission(sender: string, permission: StoredPermission): Promise<void> {
     const current = this.state.permissionsBySender[sender] || []
     const withoutOld = current.filter((item) => item.permissionID !== permission.permissionID)
     withoutOld.push(permission)
@@ -120,18 +214,18 @@ class StateStore {
     await this.save()
   }
 
-  getPermissions(sender) {
+  getPermissions(sender: string): StoredPermission[] {
     return this.state.permissionsBySender[sender] || []
   }
 
-  async removePermission(sender, permissionID) {
+  async removePermission(sender: string, permissionID: string): Promise<void> {
     this.state.permissionsBySender[sender] = (this.state.permissionsBySender[sender] || []).filter(
       (item) => item.permissionID !== permissionID,
     )
     await this.save()
   }
 
-  findPermission(sender, token) {
+  findPermission(sender: string, token: string): StoredPermission | null {
     const permissions = this.getPermissions(sender)
     if (!permissions.length) return null
     if (token) return permissions.find((item) => item.permissionID === token) || null
@@ -139,7 +233,7 @@ class StateStore {
   }
 }
 
-function verifyWebhook(rawBody, signature, secret) {
+function verifyWebhook(rawBody: string, signature: string | null, secret: string): boolean {
   if (!signature || !secret) return false
 
   const expected = createHmac("sha256", secret).update(rawBody).digest("hex")
@@ -152,7 +246,7 @@ function verifyWebhook(rawBody, signature, secret) {
   }
 }
 
-async function log(client, level, message, extra = {}) {
+async function log(client: PluginContext["client"], level: LogLevel, message: string, extra: Record<string, unknown> = {}): Promise<void> {
   try {
     await client.app.log({
       body: {
@@ -167,7 +261,7 @@ async function log(client, level, message, extra = {}) {
   }
 }
 
-function parseConfig(worktree) {
+function parseConfig(worktree: string): { missing: string[]; config: ParsedConfig } {
   const apiKey = Bun.env.OPENCODE_MESSAGES_DEV_API_KEY || ""
   const line = normalizeHandle(Bun.env.OPENCODE_MESSAGES_DEV_LINE)
   const webhookSecret = Bun.env.OPENCODE_MESSAGES_DEV_WEBHOOK_SECRET || ""
@@ -178,7 +272,7 @@ function parseConfig(worktree) {
   const statePath = join(worktree, Bun.env.OPENCODE_MESSAGES_DEV_STATE_FILE || DEFAULT_STATE_FILE)
   const maxChunkChars = Number(Bun.env.OPENCODE_MESSAGES_DEV_MAX_CHUNK_CHARS || DEFAULT_MAX_CHUNK_CHARS)
 
-  const missing = []
+  const missing: string[] = []
   if (!apiKey) missing.push("OPENCODE_MESSAGES_DEV_API_KEY")
   if (!line) missing.push("OPENCODE_MESSAGES_DEV_LINE")
   if (!webhookSecret) missing.push("OPENCODE_MESSAGES_DEV_WEBHOOK_SECRET")
@@ -201,7 +295,7 @@ function parseConfig(worktree) {
   }
 }
 
-async function messagesFetch(config, path, init = {}) {
+async function messagesFetch(config: ParsedConfig, path: string, init: RequestInit = {}): Promise<unknown> {
   const response = await fetch(`https://api.messages.dev/v1${path}`, {
     ...init,
     headers: {
@@ -212,9 +306,9 @@ async function messagesFetch(config, path, init = {}) {
   })
 
   const text = await response.text()
-  let body = null
+  let body: { error?: { message?: string } } | null = null
   try {
-    body = text ? JSON.parse(text) : null
+    body = text ? (JSON.parse(text) as { error?: { message?: string } }) : null
   } catch {
     body = null
   }
@@ -226,7 +320,7 @@ async function messagesFetch(config, path, init = {}) {
   return body
 }
 
-async function sendMessage(config, to, text) {
+async function sendMessage(config: ParsedConfig, to: string, text: string): Promise<void> {
   const chunks = splitText(text, config.maxChunkChars)
   for (const chunk of chunks) {
     await messagesFetch(config, "/messages", {
@@ -240,15 +334,15 @@ async function sendMessage(config, to, text) {
   }
 }
 
-function extractText(parts) {
+function extractText(parts: SessionResult["parts"]): string {
   return (parts || [])
     .filter((part) => part && part.type === "text" && typeof part.text === "string" && part.text.trim())
-    .map((part) => part.text.trim())
+    .map((part) => part.text!.trim())
     .join("\n\n")
     .trim()
 }
 
-function formatResult(sessionID, result) {
+function formatResult(sessionID: string, result: SessionResult): string {
   const info = result?.info || {}
   const errorText = info?.error?.data?.message || info?.error?.message
   if (errorText) return `Session ${sessionID} failed.\n\n${errorText}`
@@ -258,7 +352,7 @@ function formatResult(sessionID, result) {
   return `Session ${sessionID} completed.`
 }
 
-function formatPermissionRequest(permission) {
+function formatPermissionRequest(permission: PermissionProperties): string {
   const metadata = permission?.metadata ? JSON.stringify(permission.metadata, null, 2) : ""
   const details = metadata ? `\n\n${metadata}` : ""
   return [
@@ -274,7 +368,7 @@ function formatPermissionRequest(permission) {
     .trim()
 }
 
-function formatHelp() {
+function formatHelp(): string {
   return [
     "Remote OpenCode commands:",
     "",
@@ -291,7 +385,7 @@ function formatHelp() {
   ].join("\n")
 }
 
-function parseIncomingCommand(text) {
+function parseIncomingCommand(text: string): { type: string; value?: string } {
   const trimmed = String(text || "").trim()
   if (!trimmed) return { type: "empty" }
   const [head, ...rest] = trimmed.split(/\s+/)
@@ -321,12 +415,12 @@ function parseIncomingCommand(text) {
   }
 }
 
-function getSessionStatus(statusMap, sessionID) {
+function getSessionStatus(statusMap: SessionStatusMap, sessionID: string): string {
   if (!statusMap || !sessionID) return "unknown"
   return statusMap[sessionID]?.type || "unknown"
 }
 
-export const MessagesDevRemotePlugin = async ({ client, worktree }) => {
+export const OpencodeMessagesPlugin = async ({ client, worktree }: PluginContext): Promise<Record<string, unknown>> => {
   const { config, missing } = parseConfig(worktree)
 
   if (missing.length) {
@@ -337,9 +431,9 @@ export const MessagesDevRemotePlugin = async ({ client, worktree }) => {
   const state = new StateStore(config.statePath)
   await state.load()
 
-  const activeSenders = new Set()
+  const activeSenders = new Set<string>()
 
-  async function ensureSession(sender, preferredTitle) {
+  async function ensureSession(sender: string, preferredTitle?: string): Promise<string> {
     const currentSessionID = state.getCurrentSession(sender)
     if (currentSessionID) return currentSessionID
 
@@ -355,7 +449,7 @@ export const MessagesDevRemotePlugin = async ({ client, worktree }) => {
     return session.id
   }
 
-  async function runExclusive(sender, runner) {
+  async function runExclusive(sender: string, runner: () => Promise<void>): Promise<void> {
     if (activeSenders.has(sender)) {
       await sendMessage(config, sender, "A request is already running for this sender. Wait for it to finish or send /abort.")
       return
@@ -369,7 +463,11 @@ export const MessagesDevRemotePlugin = async ({ client, worktree }) => {
     }
   }
 
-  async function handleApproval(sender, permission, response) {
+  async function handleApproval(
+    sender: string,
+    permission: StoredPermission,
+    response: "once" | "always" | "reject",
+  ): Promise<void> {
     await client.postSessionIdPermissionsPermissionId({
       path: {
         id: permission.sessionID,
@@ -384,7 +482,7 @@ export const MessagesDevRemotePlugin = async ({ client, worktree }) => {
     await sendMessage(config, sender, `Permission ${permission.permissionID} replied with ${response}.`)
   }
 
-  async function handleCommand(sender, text) {
+  async function handleCommand(sender: string, text: string): Promise<void> {
     const command = parseIncomingCommand(text)
 
     if (command.type === "empty") return
@@ -457,7 +555,7 @@ export const MessagesDevRemotePlugin = async ({ client, worktree }) => {
     }
 
     if (command.type === "approve" || command.type === "deny") {
-      const permission = state.findPermission(sender, command.value)
+      const permission = state.findPermission(sender, command.value || "")
       if (!permission) {
         const pending = state.getPermissions(sender)
         const message = pending.length
@@ -520,7 +618,7 @@ export const MessagesDevRemotePlugin = async ({ client, worktree }) => {
             },
             body: {
               agent: "build",
-              command: command.value,
+              command: command.value!,
             },
           }),
         )
@@ -544,7 +642,7 @@ export const MessagesDevRemotePlugin = async ({ client, worktree }) => {
             parts: [
               {
                 type: "text",
-                text: command.value,
+                text: command.value || "",
               },
             ],
           },
@@ -555,11 +653,11 @@ export const MessagesDevRemotePlugin = async ({ client, worktree }) => {
     })
   }
 
-  async function handleWebhookEvent(payload) {
+  async function handleWebhookEvent(payload: MessagesWebhookPayload): Promise<void> {
     if (payload?.event !== "message.received") return
 
     const sender = normalizeHandle(payload?.data?.sender)
-    const messageID = payload?.data?.id
+    const messageID = payload?.data?.id || ""
     const text = String(payload?.data?.text || "").trim()
 
     if (!sender || !messageID || !text) return
@@ -584,12 +682,12 @@ export const MessagesDevRemotePlugin = async ({ client, worktree }) => {
     }
   }
 
-  let server
+  let server: ReturnType<typeof Bun.serve>
   try {
     server = Bun.serve({
       hostname: config.host,
       port: config.port,
-      async fetch(request) {
+      async fetch(request: Request): Promise<Response> {
         const url = new URL(request.url)
 
         if (request.method === "GET" && url.pathname === "/health") {
@@ -611,9 +709,9 @@ export const MessagesDevRemotePlugin = async ({ client, worktree }) => {
           return new Response("Invalid signature", { status: 401 })
         }
 
-        let payload
+        let payload: MessagesWebhookPayload
         try {
-          payload = JSON.parse(rawBody)
+          payload = JSON.parse(rawBody) as MessagesWebhookPayload
         } catch {
           return new Response("Invalid JSON", { status: 400 })
         }
@@ -630,7 +728,7 @@ export const MessagesDevRemotePlugin = async ({ client, worktree }) => {
       },
     })
   } catch (error) {
-    await log(client, "error", "Failed to start Messages.dev bridge", {
+    await log(client, "error", "Failed to start opencode-messages bridge", {
       host: config.host,
       port: config.port,
       error: error instanceof Error ? error.message : String(error),
@@ -638,7 +736,7 @@ export const MessagesDevRemotePlugin = async ({ client, worktree }) => {
     return {}
   }
 
-  await log(client, "info", "Messages.dev remote control bridge started", {
+  await log(client, "info", "opencode-messages bridge started", {
     host: config.host,
     port: config.port,
     webhookPath: config.webhookPath,
@@ -647,7 +745,7 @@ export const MessagesDevRemotePlugin = async ({ client, worktree }) => {
   })
 
   return {
-    event: async ({ event }) => {
+    event: async ({ event }: { event: PluginEvent }): Promise<void> => {
       if (!event) return
 
       if (event.type === "permission.updated" || event.type === "permission.asked") {
@@ -678,3 +776,5 @@ export const MessagesDevRemotePlugin = async ({ client, worktree }) => {
     },
   }
 }
+
+export default OpencodeMessagesPlugin
